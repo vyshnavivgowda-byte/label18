@@ -41,6 +41,9 @@ export default function CanvasSequence({
   const [shouldLoad, setShouldLoad] = useState(!lazy);
   const frameRef = useRef({ frame: 0 });
   const lastRenderedIndexRef = useRef<number | null>(null);
+  // Tracks the highest frame index that has ever finished loading.
+  // Correct even if frames finish out of order, since it's a running max.
+  const highestLoadedIndexRef = useRef<number>(-1);
 
   const totalFrames = sequences.reduce((acc, seq) => acc + seq.frameCount, 0);
 
@@ -135,7 +138,9 @@ export default function CanvasSequence({
     [fitMode]
   );
 
-  // Finds closest loaded frame to avoid any blank/black screens during scroll
+  // Finds closest loaded frame to avoid any blank/black screens during scroll.
+  // Backward scan is bounded by highestLoadedIndexRef so we never waste cycles
+  // scanning through frames we already know haven't loaded yet.
   const getBestAvailableImage = useCallback(
     (targetIndex: number, imgList: HTMLImageElement[]) => {
       if (!imgList || imgList.length === 0) return null;
@@ -146,8 +151,11 @@ export default function CanvasSequence({
         return { img: target, index: targetIndex };
       }
 
-      // 2. Search backwards for closest previously loaded frame
-      for (let i = targetIndex - 1; i >= 0; i--) {
+      // 2. Search backwards for closest previously loaded frame, but never
+      //    scan past the highest index we've confirmed has loaded — anything
+      //    beyond that is guaranteed not to be ready.
+      const backwardStart = Math.min(targetIndex - 1, highestLoadedIndexRef.current);
+      for (let i = backwardStart; i >= 0; i--) {
         const candidate = imgList[i];
         if (candidate && candidate.complete && candidate.naturalWidth > 0) {
           return { img: candidate, index: i };
@@ -202,11 +210,13 @@ export default function CanvasSequence({
     [bgColor, drawImageOnly, fitMode, getBestAvailableImage]
   );
 
-  // Set canvas dimensions immediately on mount and handle resize
+  // Set canvas dimensions immediately on mount and handle resize.
+  // DPR is capped at 2 — anything higher just burns draw time with no
+  // visible benefit for a full-bleed background sequence.
   useEffect(() => {
     const updateCanvasSize = () => {
       if (!canvasRef.current) return;
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
       canvasRef.current.width = window.innerWidth * dpr;
       canvasRef.current.height = window.innerHeight * dpr;
 
@@ -232,10 +242,14 @@ export default function CanvasSequence({
     return () => window.removeEventListener("resize", updateCanvasSize);
   }, [images, renderFrameIndex]);
 
-  // Load image sequence when active
+  // Load image sequence when active.
+  // - decoding="async" keeps decode off the main thread
+  // - fetchPriority="high" on the first ~15 frames of each sequence so the
+  //   opening scroll doesn't stall behind later frames in the queue
   useEffect(() => {
     if (!shouldLoad) return;
 
+    highestLoadedIndexRef.current = -1;
     const loadedImages: HTMLImageElement[] = [];
     let globalFrameIndex = 0;
 
@@ -243,15 +257,25 @@ export default function CanvasSequence({
       const ext = seq.extension || "jpg";
       const padLength = seq.digits ?? 3;
       const start = seq.startFrame ?? 1;
+
       for (let i = 0; i < seq.frameCount; i++) {
         const frameIndex = start + i;
         const img = new Image();
+        img.decoding = "async";
+        if (i < 15) {
+          img.fetchPriority = "high";
+        }
+
         const paddedIndex = frameIndex.toString().padStart(padLength, "0");
         img.src = `${seq.path}${paddedIndex}.${ext}`;
 
         const currentGlobalIndex = globalFrameIndex++;
 
         img.onload = () => {
+          if (currentGlobalIndex > highestLoadedIndexRef.current) {
+            highestLoadedIndexRef.current = currentGlobalIndex;
+          }
+
           if (currentGlobalIndex === 0 && canvasRef.current) {
             const ctx = canvasRef.current.getContext("2d");
             if (ctx) {
@@ -259,6 +283,7 @@ export default function CanvasSequence({
             }
           }
         };
+
         loadedImages.push(img);
       }
     });

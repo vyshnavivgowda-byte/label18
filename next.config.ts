@@ -23,7 +23,7 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
-        source: "/hero_frame/:path*",
+        source: "/banner_image/:path*",
         headers: [
           {
             key: "Cache-Control",
